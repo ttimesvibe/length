@@ -105,45 +105,38 @@ function parseBlocks(text) {
   return blocks.map((b, i) => ({ ...b, index: i }));
 }
 
+// ═══════════════════════════════════════════
+// LINEAR REGRESSION MODEL (v2)
+// 영상길이(분) = SLOPE × cleanText글자수 + INTERCEPT
+// 7건 학습, LOO MAE 3.9%, R²=0.949
+// ═══════════════════════════════════════════
+
 const TRAINING_DATA = [
-  { name: "최지웅2편", chars: 17851, minutes: 32 },
-  { name: "박종천1편", chars: 15602, minutes: 25 },
-  { name: "강정수1편", chars: 14470, minutes: 27.35 },
-  { name: "강수진4편", chars: 13520, minutes: 27.87 },
-  { name: "김창현1편", chars: 26505, minutes: 49.83 },
-  { name: "김창현2편", chars: 14820, minutes: 28.05 },
-  { name: "이세돌1편", chars: 17808, minutes: 34.2 },
-  { name: "이세돌2편", chars: 21019, minutes: 32.8 },
+  { name: "김창현1편", chars: 12255, minutes: 21 + 20/60 },
+  { name: "김창현2편", chars: 15684, minutes: 27 + 30/60 },
+  { name: "박종천1편", chars: 16500, minutes: 25 + 50/60 },
+  { name: "강정수1편", chars: 15274, minutes: 25 + 45/60 },
+  { name: "박종천3편", chars: 19288, minutes: 30 + 46/60 },
+  { name: "허진호1편", chars: 21509, minutes: 32 + 11/60 },
+  { name: "이세돌2편", chars: 20765, minutes: 32 + 48/60 },
 ];
 
-const HYBRID_ALPHA = 0.6; // 글로벌 비중 60% + 로컬 40% (MAE 4.5%)
+// 선형회귀 계수 (전체 7건)
+const SLOPE = 0.001210;     // 글자수 1자당 분
+const INTERCEPT = 7.05;     // 기본 시간(분) — 오프닝/엔딩/전환 등
+const LOO_RESIDUAL_STD = 1.19; // LOO 잔차 표준편차(분)
 
-function calcLearningStats() {
-  if (TRAINING_DATA.length === 0) return { avgCharsPerMin: 540, count: 0, stdCharsPerMin: 0 };
-  const rates = TRAINING_DATA.map(d => d.chars / d.minutes);
-  const avg = rates.reduce((s, r) => s + r, 0) / rates.length;
-  const variance = rates.reduce((s, r) => s + (r - avg) ** 2, 0) / rates.length;
-  const std = Math.sqrt(variance);
-  return { avgCharsPerMin: Math.round(avg * 10) / 10, stdCharsPerMin: Math.round(std * 10) / 10, count: TRAINING_DATA.length };
-}
-
-function calc95CI(chars, learning, totalChars, totalSeconds) {
-  if (!learning.count || !learning.avgCharsPerMin) return null;
-  const globalRate = learning.avgCharsPerMin;
-  let effectiveRate = globalRate;
-  let method = "글자수";
-  if (totalSeconds > 0 && totalChars > 0) {
-    const localRate = (totalChars / totalSeconds) * 60;
-    effectiveRate = globalRate * HYBRID_ALPHA + localRate * (1 - HYBRID_ALPHA);
-    method = "TS+밀도";
-  }
-  const pointSec = (chars / effectiveRate) * 60;
-  const lowRate = effectiveRate + 1.96 * learning.stdCharsPerMin;
-  const highRate = effectiveRate - 1.96 * learning.stdCharsPerMin;
-  if (highRate <= 0) return { pointSec, lowSec: pointSec * 0.8, highSec: pointSec * 1.2, method, effectiveRate: Math.round(effectiveRate * 10) / 10 };
-  const lowSec = (chars / lowRate) * 60;
-  const highSec = (chars / highRate) * 60;
-  return { pointSec, lowSec, highSec, method, effectiveRate: Math.round(effectiveRate * 10) / 10 };
+function calcRegression(cleanChars) {
+  const pointMin = SLOPE * cleanChars + INTERCEPT;
+  const ci95 = 1.96 * LOO_RESIDUAL_STD;
+  return {
+    pointSec: pointMin * 60,
+    lowSec: (pointMin - ci95) * 60,
+    highSec: (pointMin + ci95) * 60,
+    pointMin,
+    ci95,
+    count: TRAINING_DATA.length,
+  };
 }
 
 function tsToSeconds(ts) {
@@ -168,7 +161,6 @@ function secondsToDisplay(sec) {
 }
 
 function calcDuration(blocks, deletedBlockIndices = new Set()) {
-  const learning = calcLearningStats();
   let totalSeconds = 0, deletedSeconds = 0, keptSeconds = 0;
   let keptChars = 0, totalChars = 0, deletedChars = 0;
   for (let i = 0; i < blocks.length; i++) {
@@ -181,8 +173,7 @@ function calcDuration(blocks, deletedBlockIndices = new Set()) {
     if (isDeleted) { deletedSeconds += duration; deletedChars += b.text.length; }
     else { keptSeconds += duration; keptChars += b.text.length; }
   }
-  const learningEstimateSec = learning.count > 0 ? (keptChars / learning.avgCharsPerMin) * 60 : null;
-  return { totalSeconds, deletedSeconds, keptSeconds, totalChars, deletedChars, keptChars, learningEstimateSec, learning };
+  return { totalSeconds, deletedSeconds, keptSeconds, totalChars, deletedChars, keptChars };
 }
 
 // ═══════════════════════════════════════════
@@ -340,9 +331,8 @@ export default function App() {
     {result && (() => {
       const { duration, blocks, deletedBlockIndices, cleanTextChars, hasTrackChanges, paragraphs } = result;
       const delSet = new Set(deletedBlockIndices || []);
-      const learning = calcLearningStats();
       const cleanChars = cleanTextChars || duration.keptChars;
-      const ci = calc95CI(cleanChars, learning, duration.totalChars, duration.totalSeconds);
+      const reg = calcRegression(cleanChars);
 
       return <div style={{display:"flex", flexDirection:"column", height:"calc(100vh - 52px)"}}>
         {/* Summary Cards */}
@@ -353,42 +343,41 @@ export default function App() {
               <div style={{fontSize:11, fontWeight:700, color:C.txD, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10}}>📄 원본 분량</div>
               <div style={{fontSize:28, fontWeight:800, color:C.tx, marginBottom:4}}>{secondsToDisplay(duration.totalSeconds)}</div>
               <div style={{fontSize:12, color:C.txM}}>{duration.totalChars.toLocaleString()}자 · {blocks.length}블록</div>
+              {hasTrackChanges && duration.deletedChars > 0 && <div style={{fontSize:11, color:C.tTx, marginTop:4}}>
+                삭제선 {duration.deletedChars.toLocaleString()}자 ({Math.round(duration.deletedChars / duration.totalChars * 100)}%)
+              </div>}
             </div>
             {/* 예상 영상 길이 */}
             <div style={{flex:1, minWidth:200, padding:16, borderRadius:12, background:C.cBg, border:`1px solid ${C.cBorder}`}}>
               <div style={{fontSize:11, fontWeight:700, color:C.cTx, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10}}>🎬 예상 영상 길이</div>
-              {ci ? <>
-                <div style={{display:"flex", alignItems:"baseline", gap:8}}>
-                  <div style={{fontSize:28, fontWeight:800, color:C.cTx}}>{secondsToDisplay(ci.pointSec)}</div>
-                  {ci.method === "TS+밀도" && <span style={{fontSize:10, padding:"2px 6px", borderRadius:4, background:C.cMid, color:C.txD}}>TS+밀도</span>}
-                </div>
-                <div style={{marginTop:6, padding:"5px 10px", borderRadius:6, background:C.cMid, display:"inline-block"}}>
-                  <span style={{fontSize:12, color:C.txM, fontWeight:600}}>
-                    {secondsToDisplay(ci.lowSec)} ~ {secondsToDisplay(ci.highSec)}
-                  </span>
-                  <span style={{fontSize:10, color:C.txD, marginLeft:6}}>(95% 신뢰구간)</span>
-                </div>
-                <div style={{marginTop:6, fontSize:10, color:C.txD}}>
-                  {learning.count}건 학습 · 적용 {ci.effectiveRate}자/분 · 삭제 후 {cleanChars.toLocaleString()}자
-                </div>
-                {duration.keptSeconds > 0 && <div style={{fontSize:11, color:C.txD, marginTop:4}}>
-                  타임스탬프 기준: {secondsToDisplay(duration.keptSeconds)}
-                </div>}
-              </> : <>
-                <div style={{fontSize:28, fontWeight:800, color:C.cTx}}>{secondsToDisplay(duration.keptSeconds)}</div>
-                <span style={{fontSize:11, color:C.txD}}>(타임스탬프 기준)</span>
-              </>}
+              <div style={{fontSize:28, fontWeight:800, color:C.cTx}}>{secondsToDisplay(reg.pointSec)}</div>
+              <div style={{marginTop:6, padding:"5px 10px", borderRadius:6, background:C.cMid, display:"inline-block"}}>
+                <span style={{fontSize:12, color:C.txM, fontWeight:600}}>
+                  {secondsToDisplay(reg.lowSec)} ~ {secondsToDisplay(reg.highSec)}
+                </span>
+                <span style={{fontSize:10, color:C.txD, marginLeft:6}}>(95% 신뢰구간)</span>
+              </div>
+              <div style={{marginTop:6, fontSize:10, color:C.txD}}>
+                {reg.count}건 학습 · 선형회귀 (LOO MAE 3.9%) · 삭제 후 {cleanChars.toLocaleString()}자
+              </div>
+              {duration.keptSeconds > 0 && <div style={{fontSize:11, color:C.txD, marginTop:4}}>
+                타임스탬프 기준: {secondsToDisplay(duration.keptSeconds)}
+              </div>}
               <div style={{fontSize:12, color:C.txM, marginTop:4}}>{blocks.length - delSet.size}블록 잔존</div>
             </div>
           </div>
 
           {/* 학습 데이터 표 */}
           <details style={{maxWidth:900, margin:"14px auto 0"}}>
-            <summary style={{fontSize:12, color:C.txD, cursor:"pointer", userSelect:"none"}}>📊 학습 데이터 ({TRAINING_DATA.length}건)</summary>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(180px, 1fr))", gap:6, marginTop:8}}>
-              {TRAINING_DATA.map((d,i) => <div key={i} style={{fontSize:11, color:C.txM, padding:"4px 8px", borderRadius:6, background:C.glass, border:`1px solid ${C.bd}`}}>
-                {d.name} — {d.chars.toLocaleString()}자 / {d.minutes}분 ({Math.round(d.chars/d.minutes)}자/분)
-              </div>)}
+            <summary style={{fontSize:12, color:C.txD, cursor:"pointer", userSelect:"none"}}>📊 학습 데이터 ({TRAINING_DATA.length}건) · y = {SLOPE} × 글자수 + {INTERCEPT}</summary>
+            <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(200px, 1fr))", gap:6, marginTop:8}}>
+              {TRAINING_DATA.map((d,i) => {
+                const pred = SLOPE * d.chars + INTERCEPT;
+                const err = Math.abs(pred - d.minutes) / d.minutes * 100;
+                return <div key={i} style={{fontSize:11, color:C.txM, padding:"4px 8px", borderRadius:6, background:C.glass, border:`1px solid ${C.bd}`}}>
+                  {d.name} — {d.chars.toLocaleString()}자 / {Math.round(d.minutes)}분 (오차 {err.toFixed(1)}%)
+                </div>;
+              })}
             </div>
           </details>
         </div>
