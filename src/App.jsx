@@ -115,10 +115,23 @@ const TRAINING_DATA = [
 ];
 
 function calcLearningStats() {
-  if (TRAINING_DATA.length === 0) return { avgCharsPerMin: 540, count: 0 };
+  if (TRAINING_DATA.length === 0) return { avgCharsPerMin: 540, count: 0, stdCharsPerMin: 0 };
   const rates = TRAINING_DATA.map(d => d.chars / d.minutes);
   const avg = rates.reduce((s, r) => s + r, 0) / rates.length;
-  return { avgCharsPerMin: Math.round(avg * 10) / 10, count: TRAINING_DATA.length };
+  const variance = rates.reduce((s, r) => s + (r - avg) ** 2, 0) / rates.length;
+  const std = Math.sqrt(variance);
+  return { avgCharsPerMin: Math.round(avg * 10) / 10, stdCharsPerMin: Math.round(std * 10) / 10, count: TRAINING_DATA.length };
+}
+
+function calc95CI(chars, learning) {
+  if (!learning.count || !learning.avgCharsPerMin) return null;
+  const pointSec = (chars / learning.avgCharsPerMin) * 60;
+  const lowRate = learning.avgCharsPerMin + 1.96 * learning.stdCharsPerMin;
+  const highRate = learning.avgCharsPerMin - 1.96 * learning.stdCharsPerMin;
+  if (highRate <= 0) return { pointSec, lowSec: pointSec * 0.8, highSec: pointSec * 1.2 };
+  const lowSec = (chars / lowRate) * 60;
+  const highSec = (chars / highRate) * 60;
+  return { pointSec, lowSec, highSec };
 }
 
 function tsToSeconds(ts) {
@@ -315,10 +328,9 @@ export default function App() {
     {result && (() => {
       const { duration, blocks, deletedBlockIndices, cleanTextChars, hasTrackChanges, paragraphs } = result;
       const delSet = new Set(deletedBlockIndices || []);
-      const deletePct = duration.totalChars > 0 ? Math.round((duration.deletedChars / duration.totalChars) * 100) : 0;
       const learning = calcLearningStats();
       const cleanChars = cleanTextChars || duration.keptChars;
-      const learningEstSec = learning.count > 0 ? (cleanChars / learning.avgCharsPerMin) * 60 : null;
+      const ci = calc95CI(cleanChars, learning);
 
       return <div style={{display:"flex", flexDirection:"column", height:"calc(100vh - 52px)"}}>
         {/* Summary Cards */}
@@ -330,24 +342,21 @@ export default function App() {
               <div style={{fontSize:28, fontWeight:800, color:C.tx, marginBottom:4}}>{secondsToDisplay(duration.totalSeconds)}</div>
               <div style={{fontSize:12, color:C.txM}}>{duration.totalChars.toLocaleString()}자 · {blocks.length}블록</div>
             </div>
-            {/* 삭제 구간 */}
-            {hasTrackChanges && <div style={{flex:1, minWidth:200, padding:16, borderRadius:12, background:C.tBg, border:`1px solid ${C.tBorder}`}}>
-              <div style={{fontSize:11, fontWeight:700, color:C.tTx, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10}}>✂️ 삭제 구간</div>
-              <div style={{fontSize:28, fontWeight:800, color:C.tTx, marginBottom:4}}>{secondsToDisplay(duration.deletedSeconds)}</div>
-              <div style={{fontSize:12, color:C.txM}}>{duration.deletedChars.toLocaleString()}자 · {delSet.size}블록 ({deletePct}%)</div>
-            </div>}
             {/* 예상 영상 길이 */}
             <div style={{flex:1, minWidth:200, padding:16, borderRadius:12, background:C.cBg, border:`1px solid ${C.cBorder}`}}>
               <div style={{fontSize:11, fontWeight:700, color:C.cTx, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10}}>🎬 예상 영상 길이</div>
-              {learningEstSec ? <>
+              {ci ? <>
                 <div style={{display:"flex", alignItems:"baseline", gap:8}}>
-                  <div style={{fontSize:28, fontWeight:800, color:C.cTx}}>{secondsToDisplay(learningEstSec)}</div>
-                  <span style={{fontSize:11, color:C.txD}}>(학습 보정)</span>
+                  <div style={{fontSize:28, fontWeight:800, color:C.cTx}}>{secondsToDisplay(ci.pointSec)}</div>
                 </div>
-                <div style={{marginTop:6, padding:"5px 8px", borderRadius:6, background:C.cMid}}>
-                  <span style={{fontSize:10, color:C.txD}}>
-                    {learning.count}건 학습 데이터 · {learning.avgCharsPerMin}자/분 · 삭제 후 {cleanChars.toLocaleString()}자
+                <div style={{marginTop:6, padding:"5px 10px", borderRadius:6, background:C.cMid, display:"inline-block"}}>
+                  <span style={{fontSize:12, color:C.txM, fontWeight:600}}>
+                    {secondsToDisplay(ci.lowSec)} ~ {secondsToDisplay(ci.highSec)}
                   </span>
+                  <span style={{fontSize:10, color:C.txD, marginLeft:6}}>(95% 신뢰구간)</span>
+                </div>
+                <div style={{marginTop:6, fontSize:10, color:C.txD}}>
+                  {learning.count}건 학습 · {learning.avgCharsPerMin}자/분 ± {learning.stdCharsPerMin} · 삭제 후 {cleanChars.toLocaleString()}자
                 </div>
                 {duration.keptSeconds > 0 && <div style={{fontSize:11, color:C.txD, marginTop:4}}>
                   타임스탬프 기준: {secondsToDisplay(duration.keptSeconds)}
