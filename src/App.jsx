@@ -255,7 +255,7 @@ export default function App() {
       }
 
       const duration = calcDuration(blocks, deletedBlockIndices);
-      const cleanTextChars = cleanText.replace(/\s/g, "").length;
+      const cleanTextChars = cleanText.length;
 
       setResult({ paragraphs, duration, blocks, deletedBlockIndices: [...deletedBlockIndices], cleanTextChars, hasTrackChanges });
     } catch (e) {
