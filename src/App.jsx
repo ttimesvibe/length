@@ -112,7 +112,11 @@ const TRAINING_DATA = [
   { name: "강수진4편", chars: 13520, minutes: 27.87 },
   { name: "김창현1편", chars: 26505, minutes: 49.83 },
   { name: "김창현2편", chars: 14820, minutes: 28.05 },
+  { name: "이세돌1편", chars: 17808, minutes: 34.2 },
+  { name: "이세돌2편", chars: 21019, minutes: 32.8 },
 ];
+
+const HYBRID_ALPHA = 0.6; // 글로벌 비중 60% + 로컬 40% (MAE 4.5%)
 
 function calcLearningStats() {
   if (TRAINING_DATA.length === 0) return { avgCharsPerMin: 540, count: 0, stdCharsPerMin: 0 };
@@ -123,15 +127,23 @@ function calcLearningStats() {
   return { avgCharsPerMin: Math.round(avg * 10) / 10, stdCharsPerMin: Math.round(std * 10) / 10, count: TRAINING_DATA.length };
 }
 
-function calc95CI(chars, learning) {
+function calc95CI(chars, learning, totalChars, totalSeconds) {
   if (!learning.count || !learning.avgCharsPerMin) return null;
-  const pointSec = (chars / learning.avgCharsPerMin) * 60;
-  const lowRate = learning.avgCharsPerMin + 1.96 * learning.stdCharsPerMin;
-  const highRate = learning.avgCharsPerMin - 1.96 * learning.stdCharsPerMin;
-  if (highRate <= 0) return { pointSec, lowSec: pointSec * 0.8, highSec: pointSec * 1.2 };
+  const globalRate = learning.avgCharsPerMin;
+  let effectiveRate = globalRate;
+  let method = "글자수";
+  if (totalSeconds > 0 && totalChars > 0) {
+    const localRate = (totalChars / totalSeconds) * 60;
+    effectiveRate = globalRate * HYBRID_ALPHA + localRate * (1 - HYBRID_ALPHA);
+    method = "TS+밀도";
+  }
+  const pointSec = (chars / effectiveRate) * 60;
+  const lowRate = effectiveRate + 1.96 * learning.stdCharsPerMin;
+  const highRate = effectiveRate - 1.96 * learning.stdCharsPerMin;
+  if (highRate <= 0) return { pointSec, lowSec: pointSec * 0.8, highSec: pointSec * 1.2, method, effectiveRate: Math.round(effectiveRate * 10) / 10 };
   const lowSec = (chars / lowRate) * 60;
   const highSec = (chars / highRate) * 60;
-  return { pointSec, lowSec, highSec };
+  return { pointSec, lowSec, highSec, method, effectiveRate: Math.round(effectiveRate * 10) / 10 };
 }
 
 function tsToSeconds(ts) {
@@ -330,7 +342,7 @@ export default function App() {
       const delSet = new Set(deletedBlockIndices || []);
       const learning = calcLearningStats();
       const cleanChars = cleanTextChars || duration.keptChars;
-      const ci = calc95CI(cleanChars, learning);
+      const ci = calc95CI(cleanChars, learning, duration.totalChars, duration.totalSeconds);
 
       return <div style={{display:"flex", flexDirection:"column", height:"calc(100vh - 52px)"}}>
         {/* Summary Cards */}
@@ -348,6 +360,7 @@ export default function App() {
               {ci ? <>
                 <div style={{display:"flex", alignItems:"baseline", gap:8}}>
                   <div style={{fontSize:28, fontWeight:800, color:C.cTx}}>{secondsToDisplay(ci.pointSec)}</div>
+                  {ci.method === "TS+밀도" && <span style={{fontSize:10, padding:"2px 6px", borderRadius:4, background:C.cMid, color:C.txD}}>TS+밀도</span>}
                 </div>
                 <div style={{marginTop:6, padding:"5px 10px", borderRadius:6, background:C.cMid, display:"inline-block"}}>
                   <span style={{fontSize:12, color:C.txM, fontWeight:600}}>
@@ -356,7 +369,7 @@ export default function App() {
                   <span style={{fontSize:10, color:C.txD, marginLeft:6}}>(95% 신뢰구간)</span>
                 </div>
                 <div style={{marginTop:6, fontSize:10, color:C.txD}}>
-                  {learning.count}건 학습 · {learning.avgCharsPerMin}자/분 ± {learning.stdCharsPerMin} · 삭제 후 {cleanChars.toLocaleString()}자
+                  {learning.count}건 학습 · 적용 {ci.effectiveRate}자/분 · 삭제 후 {cleanChars.toLocaleString()}자
                 </div>
                 {duration.keptSeconds > 0 && <div style={{fontSize:11, color:C.txD, marginTop:4}}>
                   타임스탬프 기준: {secondsToDisplay(duration.keptSeconds)}
